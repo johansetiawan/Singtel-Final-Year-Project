@@ -17,7 +17,7 @@ typedef struct server_msg1
 typedef struct client_msg2
 {
     unsigned char  type[50];
-    uint8_t spid[16];
+    sgx_spid_t spid[16];
     uint16_t quote_type;
     uint32_t sig_rl_size;
     uint8_t sig_rl[];

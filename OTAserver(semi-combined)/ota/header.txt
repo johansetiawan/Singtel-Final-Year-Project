@@ -1,0 +1,6 @@
+OTA Header
+
+OS Version: 1.0.1
+Firmware Version: 1.0.1
+Timestamp: 08/06/2018
+Firmware: Ubuntu

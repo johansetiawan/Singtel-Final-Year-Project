@@ -17,19 +17,51 @@
 #include "sgx_tae_service.h"
 #include "sgx_utils.h"
 #include <string.h>
+#include "sgx_ukey_exchange.h"
+
 
 
 #define	INADDR_NONE		((unsigned long int) 0xffffffff)
 
 #define BUFLEN 4200
 
-
+#define PSE_RETRIES 5   
 static const unsigned char key[] = { 
 	0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf 
 };
 static const unsigned char iv[] = { 
 	0x99,0xaa,0x3e,0x68,0xed,0x81,0x73,0xa0,0xee,0xd0,0x66,0x84
 };
+
+	typedef enum {
+	NotTrusted = 0,
+	Trusted
+	} attestation_status_t;
+
+    struct msg01_struct{
+        unsigned char type[50];
+        uint32_t epid;
+        sgx_ra_msg1_t msg1;
+    };
+	
+	typedef struct _ra_msg4_struct {
+		attestation_status_t status;
+		sgx_platform_info_t platformInfoBlob;
+	} ra_msg4_t;
+	
+	#define OPT_PSE	0x01
+	sgx_status_t ra_status, status;
+	sgx_ra_context_t raCtx = 0xdeadbeef;
+	sgx_status_t *pse_status;
+	sgx_ra_msg1_t msg1;
+	sgx_ra_msg2_t msg2;
+	sgx_ra_msg3_t *msg3 = NULL;
+	uint32_t msg3_size;
+	ra_msg4_t *msg4 = NULL;
+	int b_pse;
+	sgx_ecall_get_ga_trusted_t p_get_ga;
+	msg01_struct msg01;
+	uint32_t extended_epid_group_id = 0;
 
 static void init_openssl()
 {
@@ -245,8 +277,37 @@ static bool verifyClient(X509 *client){
 	return false;
 }
 
+sgx_status_t ecall_ra_init(sgx_ec256_public_t key, int b_pse, sgx_ra_context_t *ctx){
 
-void ecall_start_tls_client(char *ip, char *bytearr, int64_t filelen, Sizes size, server_msg0 msg0, server_msg1full msg1)
+	sgx_status_t ra_status;
+
+/*	if ( b_pse ) {
+		int retries= PSE_RETRIES;
+		printf("in PSE\n");
+		do {
+			*pse_status= sgx_create_pse_session();
+			if ( *pse_status != SGX_SUCCESS ) return SGX_ERROR_UNEXPECTED;
+		} while (*pse_status == SGX_ERROR_BUSY && retries--);
+		if ( *pse_status != SGX_SUCCESS ) return SGX_ERROR_UNEXPECTED;
+		printf("Pse status : %08x\n", &pse_status);
+}*/
+	ra_status = sgx_ra_init(&key, b_pse, ctx);
+	if (ra_status != SGX_SUCCESS) {
+		printf("Sgx_ra_init failed, ra_status : %08x\n", ra_status);
+	}
+/*		if ( b_pse ) {
+		int retries= PSE_RETRIES;
+		do {
+			*pse_status= sgx_create_pse_session();
+			if ( *pse_status != SGX_SUCCESS ) return SGX_ERROR_UNEXPECTED;
+		} while (*pse_status == SGX_ERROR_BUSY && retries--);
+		if ( *pse_status != SGX_SUCCESS ) return SGX_ERROR_UNEXPECTED;
+}
+*/	return ra_status;
+}
+
+
+void ecall_start_tls_client(char *ip, char *bytearr, int64_t filelen, Sizes size)
 {
 	SSL *ssl;
 	int sock;
@@ -256,15 +317,39 @@ void ecall_start_tls_client(char *ip, char *bytearr, int64_t filelen, Sizes size
     uint32_t serv_port = 4433;
 
     //RA variables
-	uint32_t p_quote_size;
-    //sgx_target_info_t target_info;
-    sgx_report_data_t report_data;
-    sgx_report_t report;
-    const sgx_quote_nonce_t p_nonce = (sgx_quote_nonce_t) {0};
-    sgx_report_t qe_report;
-    sgx_quote_t p_quote;
-    int ret = 0;
+    //PubKey generated using https://knowledge.digicert.com/generalinformation/INFO1909.html
+    static const sgx_ec256_public_t client_pub_key = {
+    {
+   		0x2a, 0xd4, 0x1f, 0x00, 0xaf, 0x85, 0xfb, 0x86,
+   		0x4d, 0x89, 0x86, 0x33, 0xab, 0x1e, 0xfc, 0x6f,
+   		0xf0, 0xe8, 0x97, 0x7b, 0x24, 0x52, 0xcf, 0x3a,
+   		0x39, 0x8f, 0xd5, 0x2b, 0x2d, 0x1f, 0x25, 0x9d
+   	},
+   	{
+   		0x98, 0x46, 0xf2, 0x98, 0x08, 0xb0, 0xa8, 0x54,
+   		0xac, 0xa0, 0x66, 0x8b, 0x94, 0xf9, 0xb6, 0x9b,
+   		0x39, 0x16, 0x6b, 0x73, 0xe0, 0xe3, 0x44, 0xd8,
+   		0x9f, 0x33, 0x9f, 0xfc, 0x4d, 0xf1, 0x57, 0xd8
+   	}
+};
 
+    static const sgx_ec256_public_t def_service_public_key = {
+    {
+        0x72, 0x12, 0x8a, 0x7a, 0x17, 0x52, 0x6e, 0xbf,
+        0x85, 0xd0, 0x3a, 0x62, 0x37, 0x30, 0xae, 0xad,
+        0x3e, 0x3d, 0xaa, 0xee, 0x9c, 0x60, 0x73, 0x1d,
+        0xb0, 0x5b, 0xe8, 0x62, 0x1c, 0x4b, 0xeb, 0x38
+    },
+    {
+        0xd4, 0x81, 0x40, 0xd9, 0x50, 0xe2, 0x57, 0x7b,
+        0x26, 0xee, 0xb7, 0x41, 0xe7, 0xc6, 0x14, 0xe2,
+        0x24, 0xb7, 0xbd, 0xc9, 0x03, 0xf2, 0x9a, 0x28,
+        0xa8, 0x3c, 0xc8, 0x10, 0x11, 0x14, 0x5e, 0x06
+    }
+
+};
+
+//start of program
     printl("OPENSSL Version = %s", SSLeay_version(SSLEAY_VERSION));
     init_openssl();
     ctx = create_context();
@@ -306,66 +391,11 @@ void ecall_start_tls_client(char *ip, char *bytearr, int64_t filelen, Sizes size
  	}else{
 	 	printf("Client Verified\n");
 	    printl("ciphersuit: %s", SSL_get_current_cipher(ssl)->name);
-
-		//start of RA
-	    server_msg0 enclave_msg0;
-	    enclave_msg0 = msg0;
-	    unsigned char server_msg0Array[sizeof(server_msg0)];
-	    memcpy(&server_msg0Array,&enclave_msg0,sizeof(server_msg0));
-	    SSL_write(ssl,&server_msg0Array,sizeof(server_msg0));
-
-	    //prepare to receive msg0 success
-	    char receivedStrings[100];
-	    int receive = 0;
-        receive = SSL_read(ssl, &receivedStrings, sizeof(receivedStrings)+1);
-        if(strcmp(receivedStrings,"RA_MSG0_SUCCESSA") == 0) {
-        	printf("string != RA_MSG0_SUCCESS");
-        }
-        
-	    server_msg1full enclave_msg1;
-	    enclave_msg1 = msg1;
-		unsigned char server_msg1Array[sizeof(server_msg1full)];
-	    memcpy(&server_msg1Array,&enclave_msg1,sizeof(server_msg1full)); 
-	    SSL_write(ssl,&server_msg1Array,sizeof(server_msg1full));
-	    } 
-
-
-
-////start of msg2 and msg3 
-	   	int received = -1;
-	    char buf[1024];
-	    received = SSL_read(ssl, buf, sizeof(buf)); //expecting to receive msg2
-	   	client_msg2* enclave_msg2 = (client_msg2*) buf;
-	   	char msg_2_type[13];
-	   	memcpy(msg_2_type, &enclave_msg2->type, 13);
-	   	if (strcmp(msg_2_type,"TYPE_RA_MSG2") != 0) {
-	   		printl("Remote attestation halted at client msg2");
-	   	}
-
-    ret = sgx_create_report(&msg1.target_info, &report_data, &report);
-    if (ret != 1) {
-    	ret = 1;
-        printf("sgx_create_report function failed. report unsuccessfully generated");
-    }
-    ret = sgx_calc_quote_size(enclave_msg2->sig_rl, enclave_msg2->sig_rl_size, &p_quote_size);
-    if (ret != 1) {
-    	ret = 1;
-        printf("sgx_calc_quote_size function failed. Quotesize unsuccessfully generated");
-    }
-     	ret = sgx_get_quote(&report, SGX_UNLINKABLE_SIGNATURE, enclave_msg2->spid, &p_nonce, enclave_msg2->sig_rl, enclave_msg2->sig_rl_size, &qe_report, &p_quote, p_quote_size);
-    if (ret != 1) {
-    	ret = 1;
-        printf("sgx_get_quote function failed. Quote unsuccessfully generated");
-    }
-    //generating msg3
-    int ps_sec_prop = 0;
-    server_msg3 msg3;
-    char msg3type[13] = "TYPE_RA_MSG3";
-    memcpy(&msg3.type, &msg3type, 14);
-    memcpy(&msg3.quote, &p_quote, p_quote_size);
-    memcpy(&msg3.ps_sec_prop, &ps_sec_prop, 1);
+	}
 
     //receive acknowledgement from OTAclient to recieve update
+	char buf[1024];
+	int received;
     printf("awaiting update acknowledgement from OTAclient\n");
     received=SSL_read(ssl,buf,sizeof(buf));
     buf[received] = 0;

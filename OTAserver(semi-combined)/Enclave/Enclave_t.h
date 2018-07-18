@@ -15,6 +15,8 @@
 #include "sgx_tae_service.h"
 #include "sgx_utils.h"
 #include "sgx_urts.h"
+#include "sgx_tkey_exchange.h"
+#include "sgx_error.h"
 
 #include <stdlib.h> /* for size_t */
 
@@ -32,33 +34,12 @@ typedef struct Sizes {
 	int64_t file;
 } Sizes;
 
-typedef struct server_msg0 {
-	unsigned char type[50];
-	uint32_t epid;
-} server_msg0;
-
-typedef struct server_msg1full {
-	unsigned char type[50];
-	sgx_target_info_t target_info;
-	sgx_epid_group_id_t gid;
-} server_msg1full;
-
-typedef struct client_msg2 {
-	unsigned char type[50];
-	sgx_spid_t spid[16];
-	uint16_t quote_type;
-	uint32_t sig_rl_size;
-	uint8_t sig_rl[500];
-} client_msg2;
-
-typedef struct server_msg3 {
-	unsigned char type[50];
-	sgx_ps_sec_prop_desc_t ps_sec_prop;
-	uint8_t quote[2048];
-} server_msg3;
-
-void ecall_start_tls_client(char* ip, char* bytearr, int64_t filelen, Sizes s, server_msg0 msg0, server_msg1full msg1);
+void ecall_start_tls_client(char* ip, char* bytearr, int64_t filelen, Sizes s);
 long int encryption(char* inputarr, long int inputlen, char* encarr, long int enclen, char* macarr);
+sgx_status_t ecall_ra_init(sgx_ec256_public_t key, int b_pse, sgx_ra_context_t* ctx);
+sgx_status_t sgx_ra_get_ga(sgx_ra_context_t context, sgx_ec256_public_t* g_a);
+sgx_status_t sgx_ra_proc_msg2_trusted(sgx_ra_context_t context, const sgx_ra_msg2_t* p_msg2, const sgx_target_info_t* p_qe_target, sgx_report_t* p_report, sgx_quote_nonce_t* p_nonce);
+sgx_status_t sgx_ra_get_msg3_trusted(sgx_ra_context_t context, uint32_t quote_size, sgx_report_t* qe_report, sgx_ra_msg3_t* p_msg3, uint32_t msg3_size);
 
 sgx_status_t SGX_CDECL ocall_sgx_clock(long int* retval);
 sgx_status_t SGX_CDECL ocall_sgx_time(time_t* retval, time_t* timep, int t_len);
@@ -79,12 +60,15 @@ sgx_status_t SGX_CDECL ocall_sgx_close(int* retval, int fd);
 sgx_status_t SGX_CDECL ocall_sgx_getenv(int* retval, const char* env, int envlen, char* ret_str, int ret_len);
 sgx_status_t SGX_CDECL ocall_print_string(const char* str);
 sgx_status_t SGX_CDECL ocall_readCKfile(char** retval, const char* file);
-sgx_status_t SGX_CDECL ocall_get_epid_group_id(uint32_t** retval, uint32_t* extended_epid_group_id);
 sgx_status_t SGX_CDECL sgx_oc_cpuidex(int cpuinfo[4], int leaf, int subleaf);
 sgx_status_t SGX_CDECL sgx_thread_wait_untrusted_event_ocall(int* retval, const void* self);
 sgx_status_t SGX_CDECL sgx_thread_set_untrusted_event_ocall(int* retval, const void* waiter);
 sgx_status_t SGX_CDECL sgx_thread_setwait_untrusted_events_ocall(int* retval, const void* waiter, const void* self);
 sgx_status_t SGX_CDECL sgx_thread_set_multiple_untrusted_events_ocall(int* retval, const void** waiters, size_t total);
+sgx_status_t SGX_CDECL create_session_ocall(sgx_status_t* retval, uint32_t* sid, uint8_t* dh_msg1, uint32_t dh_msg1_size, uint32_t timeout);
+sgx_status_t SGX_CDECL exchange_report_ocall(sgx_status_t* retval, uint32_t sid, uint8_t* dh_msg2, uint32_t dh_msg2_size, uint8_t* dh_msg3, uint32_t dh_msg3_size, uint32_t timeout);
+sgx_status_t SGX_CDECL close_session_ocall(sgx_status_t* retval, uint32_t sid, uint32_t timeout);
+sgx_status_t SGX_CDECL invoke_service_ocall(sgx_status_t* retval, uint8_t* pse_message_req, uint32_t pse_message_req_size, uint8_t* pse_message_resp, uint32_t pse_message_resp_size, uint32_t timeout);
 
 #ifdef __cplusplus
 }

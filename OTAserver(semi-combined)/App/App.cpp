@@ -30,10 +30,18 @@
  */
 
 
+
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
 #include <stdlib.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <netinet/in.h>
+#include <resolv.h>
+#include <netdb.h>
 
 # include <unistd.h>
 # include <pwd.h>
@@ -49,8 +57,12 @@
 #include <openssl/bio.h>
 #include <openssl/x509.h>
 #include <openssl/tls1.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #include "sgx_uae_service.h"
+#include <sgx_uae_service.h>
+#include <sgx_ukey_exchange.h>
 #include "sgx_quote.h"
 #include "sgx_tcrypto.h"
 #include "sgx_trts.h"
@@ -60,6 +72,7 @@
 #include <stdint.h>
 #define SGX_AESGCM_MAC_SIZE 16
 #define SGX_AESGCM_IV_SIZE 12
+#define FAIL    -1
 
 /* Global EID shared by multiple threads */
 sgx_enclave_id_t global_eid = 0;
@@ -70,6 +83,64 @@ typedef struct _sgx_errlist_t {
     const char *sug; /* Suggestion */
 } sgx_errlist_t;
 
+//remote attestation variables
+
+    struct msg01_struct{
+        unsigned char type[50];
+        uint32_t epid;
+        sgx_ra_msg1_t msg1;
+    };
+
+    struct client_msg4{
+    unsigned char  type[50];
+    unsigned char attestation_status[50];
+    };
+
+    #define PSE_RETRIES 5   
+    #define OPT_PSE 0x01
+/*    sgx_status_t ecall_sgx_status, status;
+    sgx_ra_context_t raCtx = 0xdeadbeef;
+    sgx_status_t *pse_status;
+    sgx_ra_msg1_t msg1;
+    sgx_ra_msg2_t *msg2;
+    sgx_ra_msg3_t *msg3 = NULL;
+    uint32_t msg3_size;
+    client_msg4 *msg4;
+    int b_pse;
+    sgx_ecall_get_ga_trusted_t p_get_ga;
+    msg01_struct msg01;
+    uint32_t extended_epid_group_id = 0;*/
+
+        static const sgx_ec256_public_t client_pub_key = {
+    {
+        0x2a, 0xd4, 0x1f, 0x00, 0xaf, 0x85, 0xfb, 0x86,
+        0x4d, 0x89, 0x86, 0x33, 0xab, 0x1e, 0xfc, 0x6f,
+        0xf0, 0xe8, 0x97, 0x7b, 0x24, 0x52, 0xcf, 0x3a,
+        0x39, 0x8f, 0xd5, 0x2b, 0x2d, 0x1f, 0x25, 0x9d
+    },
+    {
+        0x98, 0x46, 0xf2, 0x98, 0x08, 0xb0, 0xa8, 0x54,
+        0xac, 0xa0, 0x66, 0x8b, 0x94, 0xf9, 0xb6, 0x9b,
+        0x39, 0x16, 0x6b, 0x73, 0xe0, 0xe3, 0x44, 0xd8,
+        0x9f, 0x33, 0x9f, 0xfc, 0x4d, 0xf1, 0x57, 0xd8
+    }
+};
+
+    static const sgx_ec256_public_t def_service_public_key = {
+    {
+        0x72, 0x12, 0x8a, 0x7a, 0x17, 0x52, 0x6e, 0xbf,
+        0x85, 0xd0, 0x3a, 0x62, 0x37, 0x30, 0xae, 0xad,
+        0x3e, 0x3d, 0xaa, 0xee, 0x9c, 0x60, 0x73, 0x1d,
+        0xb0, 0x5b, 0xe8, 0x62, 0x1c, 0x4b, 0xeb, 0x38
+    },
+    {
+        0xd4, 0x81, 0x40, 0xd9, 0x50, 0xe2, 0x57, 0x7b,
+        0x26, 0xee, 0xb7, 0x41, 0xe7, 0xc6, 0x14, 0xe2,
+        0x24, 0xb7, 0xbd, 0xc9, 0x03, 0xf2, 0x9a, 0x28,
+        0xa8, 0x3c, 0xc8, 0x10, 0x11, 0x14, 0x5e, 0x06
+    }
+
+};
 
 /* Error code returned by sgx_create_enclave */
 static sgx_errlist_t sgx_errlist[] = {
@@ -238,157 +309,206 @@ int initialize_enclave(void)
     return 0;
 }
 
-server_msg0 gen_server_msg0(server_msg0 msg0) {
-    uint32_t extended_epid_group_id = 0;
-    sgx_get_extended_epid_group_id(&extended_epid_group_id);
-    unsigned char msg0type[13] = "TYPE_RA_MSG0";
-    memcpy(&msg0.type, &msg0type, 14);
-    memcpy(&msg0.epid, &extended_epid_group_id, sizeof(extended_epid_group_id));
-//check if msg0 is generated properly
-    printf("generated msg0, type = %s\n", msg0.type);
-    return msg0;
+int OpenConnection(const char *hostname, int port)
+{   int sd;
+    struct hostent *host;
+    struct sockaddr_in addr;
+ 
+    if ( (host = gethostbyname(hostname)) == NULL )
+    {
+        perror(hostname);
+        abort();
+    }
+    sd = socket(PF_INET, SOCK_STREAM, 0);
+    bzero(&addr, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = *(long*)(host->h_addr);
+    if ( connect(sd, (struct sockaddr*)&addr, sizeof(addr)) != 0 )
+    {
+        close(sd);
+        perror(hostname);
+        abort();
+    }
+    return sd;
 }
-
-server_msg1full gen_server_msg1(server_msg1full msg1) {
-    //variables needed
-    sgx_target_info_t p_target_info;
-    sgx_epid_group_id_t p_gid;
-
-    sgx_init_quote(&p_target_info, &p_gid); //have to use p_target_info
-    char msg1type[13] = "TYPE_RA_MSG1";
-    memcpy(&msg1.type, &msg1type, 14);
-    memcpy(&msg1.gid, &p_gid, sizeof(sgx_epid_group_id_t));
-   // memcpy(&msg1.target_info, &p_target_info, sizeof(sgx_target_info_t));
-    printf("generated msg1, type = %s\n", msg1.type);
-    return msg1;
-}
-
-
-server_msg3 gen_server_msg3(client_msg2 msg2, server_msg3 msg3, int ps_sec_prop) {
-    //variables needed
-    uint32_t p_quote_size;
-    sgx_target_info_t target_info;
-    sgx_report_data_t report_data;
-    sgx_report_t report;
-    const sgx_quote_nonce_t p_nonce = (sgx_quote_nonce_t) {0};
-    sgx_report_t p_qe_report;
-    sgx_quote_t p_quote;
-    int ret = 0;
-    sgx_spid_t *spid = (sgx_spid_t*) msg2.spid;
-
+SSL_CTX* InitCTX(void){   
+    const SSL_METHOD *method;
+    SSL_CTX *ctx;
     
+    //change algo to accept only ecdsa and ecdhe
+    OpenSSL_add_all_algorithms();  /* Load cryptos, et.al. */
+    OpenSSL_add_all_ciphers();
 
+    SSL_load_error_strings();   /* Bring in and register error messages */
+    method = TLSv1_2_client_method();  /* Create new client-method instance */
+    ctx = SSL_CTX_new(method);   /* Create new context */
+    if ( ctx == NULL )
+    {
+        ERR_print_errors_fp(stderr);
+        abort();
+    }
+    SSL_CTX_set_mode(ctx,SSL_MODE_AUTO_RETRY);
+    return ctx;
+}
+void LoadCertificates(SSL_CTX* ctx, char* CertFile, char* KeyFile)
+{
+    /* set the local certificate from CertFile */
+    if ( SSL_CTX_use_certificate_file(ctx, CertFile, SSL_FILETYPE_PEM) <= 0 )
+    {
+        ERR_print_errors_fp(stderr);
+        abort();
+    }
+    /* set the private key from KeyFile (may be the same as CertFile) */
+    if ( SSL_CTX_use_PrivateKey_file(ctx, KeyFile, SSL_FILETYPE_PEM) <= 0 )
+    {
+        ERR_print_errors_fp(stderr);
+        abort();
+    }
+    /* verify private key */
+    if ( !SSL_CTX_check_private_key(ctx) )
+    {
+        fprintf(stderr, "Private key does not match the public certificate\n");
+        abort();
+    }
+}
+void ShowCerts(SSL* ssl)
+{   X509 *cert;
+    char *line;
+ 
+    cert = SSL_get_peer_certificate(ssl); /* Get client certificates (if available) */
+    if ( cert != NULL )
+    {
+        printf("Client certificates:\n");
+        line = X509_NAME_oneline(X509_get_subject_name(cert), 0, 0);
+        printf("Subject: %s\n", line);
+        free(line);
+        line = X509_NAME_oneline(X509_get_issuer_name(cert), 0, 0);
+        printf("Issuer: %s\n", line);
+        free(line);
+        X509_free(cert);
+    }
+    else
+        printf("Info: No server certificates configured.\n");
 }
 
 
+bool remoteAttestation(char *ip, sgx_enclave_id_t global_eid){
+    //remote attestation variables 
+    sgx_status_t ecall_sgx_status, status;
+    sgx_ra_context_t raCtx = 0xdeadbeef;
+    sgx_status_t *pse_status;
+    sgx_ra_msg1_t msg1;
+    sgx_ra_msg2_t *msg2;
+    sgx_ra_msg3_t *msg3 = NULL;
+    uint32_t msg3_size;
+    client_msg4 *msg4;
+    int b_pse = 0;
+    sgx_ecall_get_ga_trusted_t p_get_ga;
+    msg01_struct msg01;
+    uint32_t extended_epid_group_id = 0;
 
 
+    SSL_library_init();
+    // Initialise IAS socket
+    SSL_CTX *ctx;
+    int fd;
+    SSL *ssl;
 
-/*    
-    bool msg2check = false;
-    int receive = 0;
-    unsigned char *msg0success[30];
-    unsigned char *buf[1024] = {0};
-    char receivedStrings[100];
+    ctx=InitCTX();
+    LoadCertificates(ctx,"certs/clientssl.cert.pem","certs/client.key.pem");
 
-    //msg1 variables
-    sgx_target_info_t p_target_info;
-    sgx_epid_group_id_t p_gid;
+    //connecting to IAS
+    fd = OpenConnection(ip, 4433);
+    ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, fd); 
 
-    //msg2 variables
-    uint32_t p_quote_size;
-    sgx_target_info_t target_info;
-    sgx_report_data_t report_data;
-    sgx_report_t report;
-    const sgx_quote_nonce_t p_nonce = (sgx_quote_nonce_t) {0};
-    sgx_report_t p_qe_report;
-    sgx_quote_t p_quote;*/
-
-
-/*    int ret = 0; //declaration of var ret with type sgx_status_t
-    uint32_t *extended_epid_group_id = 0;
-    uint8_t gidbuffer[4];
-    uint32_t *epid_group_id;
-    ocall_get_epid_group_id(&epid_group_id, extended_epid_group_id);
-    receive = SSL_read(ssl, receivedStrings, sizeof(receivedStrings)); // initial read to tell server remote attestation process is starting (from client)
-        if (receivedStrings == "initRA") {
-            memset(&buf[0], 0, sizeof(buf)); //function to clear array*/
-/*            server_msg0 msg0;
-            unsigned char msg0type[13] = "TYPE_RA_MSG0";
-            memcpy(&msg0.type, &msg0type, 14);
-            memcpy(&msg0.epid, epid_group_id, sizeof(epid_group_id));
-
-            //*(uint32_t*)((uint8_t*)msg0 + sizeof(msgHeader)) = extended_epid_group_id;
-            printf("msg0 generated\n");
-            //convert struct msg0 to bytes so that client can receive through SSL
-            unsigned char casted_msg0[sizeof(msg0)];
-            printf("compiled until before first msg sent");
-            memcpy(&casted_msg0, &msg0, sizeof(msg0));
-            //send msg1 to client
-            SSL_write(ssl, casted_msg0, sizeof(casted_msg0)+1);
+    int e,f;
+    e=SSL_connect(ssl);
+    if ( e == FAIL ){
+        ERR_print_errors_fp(stderr);
+        printf("failed to connect to OTA client\n");
+        printf("%d\n",e);
+        f= SSL_get_error(ssl,e);
+        printf("%d\n", f);
+        return false;
+    }else{
+        printf("OPENSSL Version = %s\n", SSLeay_version(SSLEAY_VERSION));
+        printf("Connected to OTAclient\n");
+        //exchange msg--------------------------------------------------------------------
+            //start of ecall for init_ra
+        status  = ecall_ra_init(global_eid, &ecall_sgx_status, def_service_public_key, b_pse, &raCtx);
+        if (status != SGX_SUCCESS) { //check for ecall success
+            printf("ecall_ra_init failed, error : %08x\n", status);
+            return false;
         }
-            //prepare to receive msg0 success
-            receive = SSL_read(ssl, &receivedStrings, sizeof(receivedStrings)+1);
-            if (receivedStrings != "RA_MSG0_SUCCESS") { //set to how nic declare
-                return false;
-            }
-*/
-/*            //send msg1
-            sgx_init_quote(&p_target_info, &p_gid);
-            //generate msg1
-            server_msg1 msg1;
-            char msg1type[13] = "TYPE_RA_MSG1";
-            memcpy(&msg1.type, &msg1type, 14);
-            memcpy(&msg1.gid, &p_gid, sizeof(sgx_epid_group_id_t));
-            
-            //convert struct msg1 to bytes so that client can receive through SSL
-            unsigned char casted_msg1[sizeof(msg1)];
-            memcpy(&casted_msg1, &msg1, sizeof(msg1));
-            //send msg1 to client
-            SSL_write(ssl, casted_msg1, sizeof(casted_msg1)+1);
+        if (ecall_sgx_status != SGX_SUCCESS) { //check for ecall return value 
+            printf("sgx_ra_init failed, error : %08x\n", status);
+            return false;
+        }
+        /* --------------------- Generation of message 0||1 --------------------- */
+        status = sgx_get_extended_epid_group_id(&extended_epid_group_id);
+        if (status != SGX_SUCCESS) { //check for ecall success
+            printf("sgx_get_extended_epid_group_id failed, error : %08x\n", status);
+            return false;
+        }
+        //start of sgx_get_msg1
+        status= sgx_ra_get_msg1(raCtx, global_eid, sgx_ra_get_ga, &msg1);
+        if (status != SGX_SUCCESS) { //check for ecall success
+            printf("sgx_ra_get_msg1 failed, error : %08x\n", status);
+            return false;
+        }
 
-            //prepare to receive msg2
-            receive = SSL_read(ssl, &buf, sizeof(buf));
-            client_msg2 *msg2 = (client_msg2*) buf;
-            memset(&buf[0], 0, sizeof(buf)); //function to clear array
-            char* msg2type= "TYPE_RA_MSG2";
-            int check = strncmp ((char*) msg2->type,msg2type, strlen(msg2type));
-            if (check != 0) {
-                return false;
-            }
-            else {
-                //check against sigrl if got time
-                sgx_calc_quote_size(msg2->sig_rl, msg2->sig_rl_size, &p_quote_size);
-                sgx_create_report(&target_info, &report_data, &report);
-                sgx_spid_t *spid = (sgx_spid_t*) msg2->spid;
-                ret = sgx_get_quote(&report, SGX_UNLINKABLE_SIGNATURE, spid, &p_nonce, msg2->sig_rl, msg2->sig_rl_size, &p_qe_report, &p_quote, p_quote_size);
-                if (&p_quote == NULL) {
-                    return false;
-                }
-                else {
-                    printf("ra test stop\n");
-                }
-            }*/
-                /*server_msg3 msg3; 
-                msg3->type = TYPE_RA_MSG3;
-                msg3->quote = p_quote;
-                msg3->ps_sec_prop = 0;
-                unsigned char casted_msg3[sizeof(msg3)];
-                memcpy(&casted_msg3, &msg3, sizeof(msg3));
-                SSL_write(ssl, casted_msg3, strlen(casted_msg3) + 1);
-            }
-            receive = SSL_read(ssl, &buf, sizeof(buf));
-            client_msg4 msg4 = (client_msg4*) buf;
-            memset(&buf[0], 0, sizeof(buf)); //function to clear array
-            if (msg4.type != "TYPE_RA_MSG4") {
-                return false;
-            }
-            else {
-                if(msg4.attestation_status == ""){
-                    return TRUE;
-                } //set to correct status                   
-            }*/
-     
+        unsigned char msg01Array[sizeof(msg01_struct)];
+        unsigned char msg01type[14] = "TYPE_RA_MSG01";
+        memcpy(&msg01.type, &msg01type, 14);
+        memcpy(&msg01.msg1, &msg1, sizeof(sgx_ra_msg1_t));
+        memcpy(&msg01.epid, &extended_epid_group_id, sizeof(uint32_t));
+        memcpy(&msg01Array, &msg01, sizeof(msg01_struct));
+        printf("Size of msg1 : %d\n", sizeof(msg1));
+        // sending of msg01 will happen here
+        printf("Sending msg1\n");
+        SSL_write(ssl, msg01Array, sizeof(msg01Array)+1);
+        printf("Send msg1 success\n");
+        //receiving of msg2 will happen here rmbr to memcpy buf to &msg2
+        //start of ecall for sgx_ra_proc_msg2
+        int64_t received;
+        char buf[1024] = {0};
+        printf("Waiting for msg2 from client\n");
+        received=SSL_read(ssl,buf,sizeof(buf));
+        printf("Received msg2 from client\n");
+        msg2 = (sgx_ra_msg2_t*) buf;
+        buf[received] = 0;
+        printf("%s\n", buf);
+        status = sgx_ra_proc_msg2(raCtx, global_eid, sgx_ra_proc_msg2_trusted, sgx_ra_get_msg3_trusted, msg2, sizeof(sgx_ra_msg2_t) + msg2->sig_rl_size, &msg3, &msg3_size);
+        if (status != SGX_SUCCESS) { //check for ecall success
+            printf("sgx_ra_proc_msg2 failed, error : %08x\n", status);
+            return false;
+        }
+        free(msg2);
+        //sending of msg3 will happen here
+        unsigned char msg3Array[sizeof(sgx_ra_msg3_t)];
+        memcpy(&msg3Array, &msg3, sizeof(sgx_ra_msg3_t));
+        SSL_write(ssl, msg3Array, sizeof(msg3Array)+1);
+        free(msg3);
+        //receive msg4
+        received=SSL_read(ssl,buf,sizeof(buf));
+        buf[received] = 0;
+        int checkvalue = strcmp(buf, "IAS_QUOTE_OK");
+        if (checkvalue != 0) {
+            printf("Attestation String != IAS_QUOTE_OK\n");
+            printf("Attestation String : %s\n", buf);
+            return false;
+        }
+                
+        //--------------------------------------------------------------------------------
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        close(fd);
+
+    }
+    return true;
+}
 
 
 
@@ -495,16 +615,18 @@ int SGX_CDECL main(int argc, char *argv[])
     //memcpy(finalarr,macarr,size.mac);
     //memcpy(finalarr+maclen,encarr,size.enc);
     //memcpy(finalarr,filearr,filelen);
-
-    //start generation of messages to be used for RA
-    server_msg0 msg0;
-    server_msg1full msg1;
-    msg0 = gen_server_msg0(msg0);
-    msg1 = gen_server_msg1(msg1);
     
-    /* Start TLS Server in Enclave */
     //change argv[1] to get input from GUI instead of command line
-    ecall_start_tls_client(global_eid,argv[1],finalarr,size.file,size, msg0, msg1);
+    bool ra = remoteAttestation(argv[1], global_eid);
+    if(ra){
+        /* Start TLS Server in Enclave */
+        //change argv[1] to get input from GUI instead of command line
+        ecall_start_tls_client(global_eid,argv[1],finalarr,size.file,size);
+    }else{
+        printf("Remote Attestation failed\n");
+    }
+
+    
     
     free(filearr);
     free(headerarr);
@@ -517,7 +639,7 @@ int SGX_CDECL main(int argc, char *argv[])
     /* Destroy the enclave */
     sgx_destroy_enclave(global_eid);
     
-    printf("Info: Sample TLS Client successfully returned.\n");
+    printf("End of application.\n");
 
     printf("Enter a character before exit ...\n");
     getchar();

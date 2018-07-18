@@ -10,8 +10,10 @@ enclave {
 	include "sgx_tae_service.h"
 	include "sgx_utils.h"
 	include "sgx_urts.h"
-
+	include "sgx_tkey_exchange.h"
+	include "sgx_error.h"
 	from "sgx_tstdc.edl" import *;
+	from "sgx_tkey_exchange.edl" import *;
 
 	struct Sizes{
 		int64_t header;
@@ -20,43 +22,14 @@ enclave {
 		int64_t enc;
 		int64_t file;
 	};
-	struct server_msg0
-	{
-	    unsigned char  type[50];     /* set to one of ra_msg_type_t*/
-	    uint32_t    epid;
-	};
-	
-	struct server_msg1full
-	{
-	    unsigned char   type[50]; 
-	    sgx_target_info_t target_info;   
-	    sgx_epid_group_id_t     gid;         /* the Endian-ness of D is Little-Endian */
-	};
 
-		
-	
-	struct client_msg2
-	{
-	    unsigned char  type[50];
-	    sgx_spid_t spid[16];
-	    uint16_t quote_type;
-	    uint32_t sig_rl_size;
-	    uint8_t sig_rl[500];
-	};
-	
-	struct server_msg3
-	{
-	    unsigned char  type[50];
-	    sgx_ps_sec_prop_desc_t   ps_sec_prop; //define as 0 as not required
-	    uint8_t     quote[2048];
-	};
-	
 
-	
     trusted {
-		public void ecall_start_tls_client([in, size=16]char *ip,[in, size=filelen]char *bytearr,int64_t filelen, Sizes s, server_msg0 msg0, server_msg1full msg1);
+		public void ecall_start_tls_client([in, size=16]char *ip,[in, size=filelen]char *bytearr,int64_t filelen, Sizes s);
 
 		public long encryption([in,size=inputlen] char *inputarr, long inputlen, [out,size=enclen] char *encarr, long enclen, [out,size=16]char *macarr);
+
+		public sgx_status_t ecall_ra_init(sgx_ec256_public_t key, int b_pse, [out] sgx_ra_context_t *ctx);
 	};
 
     untrusted {
@@ -79,9 +52,13 @@ enclave {
 		int ocall_sgx_getenv([in,size=envlen]const char *env, int envlen, [out,size=ret_len]char *ret_str,int ret_len);
 		void ocall_print_string([in, string] const char *str);    
 
+
 		//////////////////////////////////////////////////////////////////////////////////////
 		char *ocall_readCKfile([in,string]const char *file);    
-		uint32_t* ocall_get_epid_group_id([in,size=2]uint32_t *extended_epid_group_id);
+		//uint32_t ocall_get_epid_group_id();
+		//sgx_ra_msg1_t ocall_get_msg1(sgx_ra_context_t raCtx, sgx_enclave_id_t enclave_id, sgx_ra_msg1_t msg1);
+
+		//sgx_ra_msg3_t *ocall_ra_proc_msg2(sgx_ra_context_t raCtx, sgx_enclave_id_t global_eid, sgx_ra_msg2_t msg2, uint32_t msg2size,[out, size=p_msg3_size] sgx_ra_msg3_t *msg3, uint32_t p_msg3_size); 
     };
 
 };

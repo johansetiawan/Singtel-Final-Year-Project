@@ -6,9 +6,11 @@
 #include "sgx_tcrypto.h"
 #include "sgx_trts.h"
 #include "stdlib.h"
+#include "sgx_key_exchange.h"
+#include "sgx_ukey_exchange.h"
 #include "sgx_tae_service.h"
-#include <string.h>
-
+#include <string.h> 
+#include "sgx_tkey_exchange.h"
 long ocall_sgx_clock(void)
 {
 	struct timespec tstart={0,0}, tend={0,0};
@@ -136,9 +138,31 @@ char *ocall_readCKfile(const char *file)
     return ck;
 }
 
-uint32_t* ocall_get_epid_group_id(uint32_t *extended_epid_group_id) {
-	 sgx_get_extended_epid_group_id(extended_epid_group_id);
+/*uint32_t ocall_get_epid_group_id() {
+	uint32_t extended_epid_group_id = 0;
+	sgx_status_t status = sgx_get_extended_epid_group_id(&extended_epid_group_id);
+	if (status != SGX_SUCCESS) {
+		printf("sgx_get_extended_epid_group_id failed, error : %08x\n", status);
+	}
 	 return(extended_epid_group_id);
 }
 
+sgx_ra_msg1_t ocall_get_msg1(sgx_ra_context_t raCtx, sgx_enclave_id_t enclave_id,sgx_ra_msg1_t msg1) {
+	sgx_status_t status = sgx_ra_get_msg1(raCtx, enclave_id, sgx_ra_get_ga, &msg1);
+	if (status != SGX_SUCCESS) {
+		printf("sgx_ra_get_msg1 failed, error : %08x\n", status);
+	}
+	return msg1;
+}
+
+sgx_ra_msg3_t *ocall_ra_proc_msg2(sgx_ra_context_t raCtx, sgx_enclave_id_t global_eid,  sgx_ra_msg2_t msg2, uint32_t msg2size, sgx_ra_msg3_t *msg3, uint32_t p_msg3_size)  {
+	sgx_ecall_proc_msg2_trusted_t p_proc_msg2;
+	sgx_ecall_get_msg3_trusted_t p_get_msg3;
+	sgx_status_t status = sgx_ra_proc_msg2(raCtx, global_eid, p_proc_msg2, p_get_msg3, &msg2, msg2size, &msg3, &p_msg3_size);
+	if (status != SGX_SUCCESS) {
+		printf("sgx_ra_proc_msg2 failed, error : %08x\n", status);
+	}
+	return msg3;
+}
+*/
 
